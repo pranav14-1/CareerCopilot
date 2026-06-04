@@ -1,0 +1,27 @@
+# Ignore local Python virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Ignore Python bytecode caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore version control and IDE configuration files
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Ignore environment file
+.env
+
+# Ignore build artifacts and documentation definitions
+PROJECT_DEFS.md
+*.pdf
+Dockerfile
+docker-compose.yml
+README.md
