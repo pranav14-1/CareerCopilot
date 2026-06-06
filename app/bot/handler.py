@@ -1,3 +1,4 @@
+import io
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -9,6 +10,9 @@ from telegram.ext import (
 )
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
+from app.services.parser import parse_resume_pdf, extract_structured_profile, generate_embedding
+from app.services.user_service import upsert_user_profile
 from app.bot.commands import (
     start_command,
     profile_command,
@@ -28,24 +32,80 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     Handle document uploads, checking size and extension, then parsing.
     """
     document = update.message.document
-    
+    tg_id = update.effective_user.id
+    username = update.effective_user.username or "Anonymous"
+
     # 1. Enforce PDF check
     if not document.file_name.lower().endswith(".pdf"):
-        await update.message.reply_text("❌ Only PDF resumes are accepted. Please upload a valid .pdf file.")
+        await update.message.reply_html("❌ <b>Only PDF resumes are accepted.</b> Please upload a valid <code>.pdf</code> file.")
         return
 
     # 2. Enforce Size Limit (5MB)
     MAX_SIZE = 5 * 1024 * 1024
     if document.file_size > MAX_SIZE:
-        await update.message.reply_text("❌ The file is too large. Maximum allowed size is 5MB.")
+        await update.message.reply_html("❌ <b>The file is too large.</b> Maximum allowed size is 5MB.")
         return
 
-    await update.message.reply_text("📥 Ingesting resume. Parsing and profile indexing started...")
-    
-    # Placeholder: In subsequent phases we will download to BytesIO and parse with pdfplumber
-    # file = await context.bot.get_file(document.file_id)
-    # pdf_bytes = io.BytesIO()
-    # await file.download_to_memory(out=pdf_bytes)
+    status_message = await update.message.reply_html("📥 <b>Ingesting resume...</b> Extacting text content...")
+
+    try:
+        # 3. Download to memory buffer
+        file_obj = await context.bot.get_file(document.file_id)
+        pdf_buffer = io.BytesIO()
+        await file_obj.download_to_memory(out=pdf_buffer)
+        pdf_buffer.seek(0)
+
+        # 4. Parse text using pdfplumber
+        logger.info(f"Parsing PDF for user {tg_id} ({username})")
+        raw_text = await parse_resume_pdf(pdf_buffer)
+        
+        if not raw_text.strip():
+            raise ValueError("The PDF contains no extractable text content.")
+
+        # 5. Extract structured profile using Gemini + Instructor
+        await status_message.edit_text("🧠 <b>Analyzing resume with AI...</b> Extracting structured profile...")
+        structured_profile = await extract_structured_profile(raw_text)
+
+        # 6. Generate 768-dim text embedding vector
+        await status_message.edit_text("🧬 <b>Generating vector embeddings...</b> Indexing skills...")
+        embedding = await generate_embedding(raw_text)
+
+        # 7. Upsert user in database
+        await status_message.edit_text("💾 <b>Saving to secure database...</b>")
+        
+        # Convert Pydantic schema to dict
+        profile_dict = structured_profile.model_dump()
+        
+        # Determine name/email with fallbacks
+        parsed_name = structured_profile.name or update.effective_user.full_name or "Unknown Candidate"
+        parsed_email = structured_profile.email or ""
+
+        async with AsyncSessionLocal() as db:
+            await upsert_user_profile(
+                db=db,
+                telegram_id=tg_id,
+                full_name=parsed_name,
+                email=parsed_email,
+                extracted_profile=profile_dict,
+                resume_text=raw_text,
+                resume_embedding=embedding
+            )
+
+        logger.info(f"Successfully onboarding user {tg_id}")
+        await status_message.edit_text(
+            f"✅ <b>Resume processed successfully!</b>\n\n"
+            f"Welcome, <b>{parsed_name}</b>. Your profile has been semantically indexed.\n\n"
+            f"• Use /profile to view your parsed details\n"
+            f"• Use /jobs to find hyper-relevant job openings"
+        )
+
+    except Exception as e:
+        logger.error(f"Error onboarding user {tg_id}: {e}", exc_info=True)
+        await status_message.edit_text(
+            "❌ <b>Onboarding failed.</b>\n\n"
+            f"An error occurred during resume parsing: <code>{str(e)}</code>.\n"
+            "Please ensure your PDF is not scan-only or password protected, then try again."
+        )
 
 
 def create_bot_app() -> Application:

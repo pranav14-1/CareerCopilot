@@ -12,8 +12,9 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --default-timeout=1000 --upgrade pip && \
+    pip install --default-timeout=1000 -r requirements.txt
 
 # --- Stage 2: Runner ---
 FROM python:3.11-slim AS runner

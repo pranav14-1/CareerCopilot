@@ -1,14 +1,58 @@
 from datetime import datetime
 import uuid
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
-# Dimension for text embeddings (e.g., Google text-multilingual-embedding-002 or gemini)
-# We will use 768 dimensions as specified in PROJECT_DEFS.md
+# Dimension for text embeddings (e.g., text-embedding-004)
 EMBEDDING_DIMENSION = 768
 
+# ==========================================
+# Pydantic Schemas for Structured Ingestion
+# ==========================================
+
+class EducationSchema(BaseModel):
+    """Schema representing an academic institution and degree details."""
+    institution: str = Field(default="", description="Name of the university, college, or school")
+    degree: str = Field(default="", description="Degree type (e.g., BTech, MS, High School)")
+    major: str = Field(default="", description="Field of study / major")
+    start_year: Optional[int] = Field(None, description="Start year")
+    end_year: Optional[int] = Field(None, description="End year or expected graduation year")
+
+
+class ExperienceSchema(BaseModel):
+    """Schema representing a professional work experience entry."""
+    company: str = Field(default="", description="Name of the company or organization")
+    role: str = Field(default="", description="Job title / role")
+    description: str = Field(default="", description="Brief description of responsibilities and achievements")
+    start_date: str = Field(default="", description="Start date (e.g., MM/YYYY or Year)")
+    end_date: str = Field(default="Present", description="End date or 'Present'")
+
+
+class ProjectSchema(BaseModel):
+    """Schema representing a personal or professional project."""
+    title: str = Field(default="", description="Title of the project")
+    description: str = Field(default="", description="Details of what was built and outcomes")
+    technologies: List[str] = Field(default_factory=list, description="List of technologies, languages, and frameworks used")
+
+
+class UserProfileSchema(BaseModel):
+    """Strict schema for profile details extracted from resume raw text."""
+    name: str = Field(default="", description="Full name of the candidate")
+    email: str = Field(default="", description="Primary email address")
+    phone: str = Field(default="", description="Contact phone number")
+    skills: List[str] = Field(default_factory=list, description="Technical skills, frameworks, tools and programming languages")
+    education: List[EducationSchema] = Field(default_factory=list, description="Academic history details")
+    experience: List[ExperienceSchema] = Field(default_factory=list, description="Professional work history")
+    projects: List[ProjectSchema] = Field(default_factory=list, description="Relevant projects listing")
+
+
+# ==========================================
+# SQLAlchemy Declarative Models
+# ==========================================
 
 class Base(DeclarativeBase):
     """Base declarative class for all database models."""
@@ -25,7 +69,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=True)
     email: Mapped[str] = mapped_column(String(255), nullable=True)
     
-    # Store the parsed resume structure as JSONB validated by Pydantic
+    # Store the parsed resume structure as JSONB validated by UserProfileSchema
     extracted_profile: Mapped[dict] = mapped_column(JSONB, nullable=True)
     resume_text: Mapped[str] = mapped_column(Text, nullable=True)
     

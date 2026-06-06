@@ -9,7 +9,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from app.core.config import settings
-from app.core.database import verify_database_connection, verify_redis_connection, redis_client
+from app.core.database import verify_database_connection, verify_redis_connection, redis_client, init_db
 
 # Setup basic logging configuration
 logging.basicConfig(
@@ -78,12 +78,44 @@ async def lifespan(app: FastAPI):
     
     if not db_ok:
         logger.error("CRITICAL: Database connection verification failed during startup.")
+    else:
+        try:
+            await init_db()
+        except Exception as e:
+            logger.error(f"Failed to auto-create database tables on startup: {e}")
+            
     if not redis_ok:
         logger.error("CRITICAL: Redis connection verification failed during startup.")
+
+    # Start bot if token is configured
+    bot_app = None
+    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_BOT_TOKEN not in ("your-telegram-bot-token-here", "placeholder_token"):
+        try:
+            from app.bot.handler import create_bot_app
+            logger.info("Initializing Telegram Bot...")
+            bot_app = create_bot_app()
+            await bot_app.initialize()
+            await bot_app.start()
+            await bot_app.updater.start_polling()
+            logger.info("Telegram Bot started and polling successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize/start Telegram Bot: {e}")
 
     yield
 
     logger.info("Shutting down CareerCopilot API Service...")
+    
+    # Stop bot if running
+    if bot_app:
+        try:
+            logger.info("Stopping Telegram Bot...")
+            await bot_app.updater.stop()
+            await bot_app.stop()
+            await bot_app.shutdown()
+            logger.info("Telegram Bot stopped successfully.")
+        except Exception as e:
+            logger.error(f"Failed to stop Telegram Bot gracefully: {e}")
+
     # Close Redis connections
     await redis_client.close()
     logger.info("Closed connections.")

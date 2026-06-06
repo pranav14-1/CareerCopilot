@@ -74,3 +74,21 @@ async def verify_redis_connection() -> bool:
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}")
         return False
+
+
+async def init_db() -> None:
+    """
+    Creates all database tables defined in the declarative schema.
+    Also ensures the pgvector extension is created in the database.
+    """
+    from app.models.schemas import Base
+    from sqlalchemy import text
+    try:
+        async with async_engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables successfully initialized with pgvector.")
+    except Exception as e:
+        logger.error(f"Failed to initialize database tables: {e}")
+        raise
+
