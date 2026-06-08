@@ -1,6 +1,15 @@
 import logging
 import time
+import socket
 from contextlib import asynccontextmanager
+
+# Force IPv4 globally to avoid connection timeouts on systems with broken IPv6 routing
+orig_getaddrinfo = socket.getaddrinfo
+def getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    if family == socket.AF_UNSPEC:
+        family = socket.AF_INET
+    return orig_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = getaddrinfo_ipv4
 from fastapi import FastAPI, Request
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -81,6 +90,9 @@ async def lifespan(app: FastAPI):
     else:
         try:
             await init_db()
+            # Initialize APScheduler for background job ingestion
+            from app.services.scheduler_tasks import initialize_scheduler
+            initialize_scheduler()
         except Exception as e:
             logger.error(f"Failed to auto-create database tables on startup: {e}")
             
@@ -105,6 +117,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down CareerCopilot API Service...")
     
+    # Shutdown scheduler if running
+    try:
+        from app.services.scheduler_tasks import scheduler
+        if scheduler.running:
+            logger.info("Shutting down APScheduler...")
+            scheduler.shutdown()
+            logger.info("APScheduler shut down successfully.")
+    except Exception as e:
+        logger.error(f"Failed to shutdown APScheduler: {e}")
+
     # Stop bot if running
     if bot_app:
         try:

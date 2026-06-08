@@ -2,7 +2,7 @@ from datetime import datetime
 import uuid
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, String, Text, Index, func, literal_column
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
@@ -99,6 +99,27 @@ class Job(Base):
     description: Mapped[str] = mapped_column(Text)
     requirements: Mapped[str] = mapped_column(Text, nullable=True)
     
+    __table_args__ = (
+        Index(
+            "hnsw_job_embedding_cosine_idx",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"}
+        ),
+        Index(
+            "ix_jobs_fts",
+            func.to_tsvector(
+                literal_column("'english'"),
+                func.coalesce(title, "") + " " +
+                func.coalesce(company, "") + " " +
+                func.coalesce(description, "") + " " +
+                func.coalesce(requirements, "")
+            ),
+            postgresql_using="gin"
+        ),
+    )
+
     # Vector embedding of the job description/role profile
     embedding = mapped_column(Vector(EMBEDDING_DIMENSION), nullable=True)
     

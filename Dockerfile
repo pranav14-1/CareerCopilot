@@ -35,6 +35,9 @@ COPY --chown=appuser:appuser . /app
 # Expose FastAPI port
 EXPOSE 8000
 
+# Prefer IPv4 over IPv6 in DNS resolution to prevent api.telegram.org timeouts
+RUN sed -i 's/#precedence ::ffff:0:0\/96  100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf || true
+
 # Switch to non-root user
 USER appuser
 

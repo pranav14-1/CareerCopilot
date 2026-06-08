@@ -39,11 +39,10 @@ services:
       dockerfile: Dockerfile
     container_name: careercopilot_web
     restart: always
-    ports:
-      - "8000:8000"
+    network_mode: "host"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/careercopilot
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5433/careercopilot
+      - REDIS_URL=redis://127.0.0.1:6379/0
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2}
@@ -51,7 +50,7 @@ services:
       - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
       - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT}
       - OTEL_SERVICE_NAME=career-copilot
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
     env_file:
       - .env
     depends_on:

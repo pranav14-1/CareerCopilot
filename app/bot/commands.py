@@ -1,5 +1,5 @@
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from html import escape
 
@@ -126,9 +126,33 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle the /jobs command. Queries the hybrid search engine.
+    Handle the /jobs command. Initiates the conversational role preference prompt.
     """
-    await update.message.reply_text("💼 *Top Job Recommendations:*\n\n[Placeholder] Scanning job listings...", parse_mode="Markdown")
+    tg_id = update.effective_user.id
+    logger.info(f"Received /jobs command from user {tg_id}")
+
+    async with AsyncSessionLocal() as db:
+        user = await get_user_profile(db, tg_id)
+
+        if not user or not user.extracted_profile or user.resume_embedding is None:
+            await update.message.reply_html(
+                "❌ <b>No resume found.</b>\n\n"
+                "Please upload your resume as a <b>PDF document</b> first so I can find matching jobs for you!"
+            )
+            return
+
+    # Set user state in Redis to expect preference query
+    from app.core.database import redis_client
+    try:
+        await redis_client.set(f"user_state:{tg_id}", "awaiting_role_pref", ex=600)
+    except Exception as e:
+        logger.error(f"Failed to set Redis user state: {e}")
+
+    await update.message.reply_html(
+        "🔍 <b>Conversational Job Search</b>\n\n"
+        "What kind of role are you looking for? (e.g., <i>AI Engineer, Backend Developer, SDE-2, Remote, Bangalore, etc.</i>)\n\n"
+        "Please type your response below and send it!"
+    )
 
 
 async def tailor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
