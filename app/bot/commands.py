@@ -123,10 +123,10 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
     await update.message.reply_html(full_text)
 
-
 async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /jobs command. Initiates the conversational role preference prompt.
+    Checks and prompts for experience level if missing.
     """
     tg_id = update.effective_user.id
     logger.info(f"Received /jobs command from user {tg_id}")
@@ -141,6 +141,29 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
+        profile = user.extracted_profile or {}
+        if not profile.get("experience_level"):
+            keyboard = [
+                [
+                    InlineKeyboardButton("Fresher", callback_data="set_exp_Fresher"),
+                    InlineKeyboardButton("0-1 year", callback_data="set_exp_0-1 year"),
+                ],
+                [
+                    InlineKeyboardButton("1-3 years", callback_data="set_exp_1-3 years"),
+                    InlineKeyboardButton("3-5 years", callback_data="set_exp_3-5 years"),
+                ],
+                [
+                    InlineKeyboardButton("5+ years", callback_data="set_exp_5+ years")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_html(
+                "📋 <b>Experience Level Required</b>\n\n"
+                "To personalize your job matches, please select your experience level first:",
+                reply_markup=reply_markup
+            )
+            return
+
     # Set user state in Redis to expect preference query
     from app.core.database import redis_client
     try:
@@ -150,8 +173,9 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await update.message.reply_html(
         "🔍 <b>Conversational Job Search</b>\n\n"
-        "What kind of role are you looking for? (e.g., <i>AI Engineer, Backend Developer, SDE-2, Remote, Bangalore, etc.</i>)\n\n"
-        "Please type your response below and send it!"
+        "What kind of role are you targeting? (e.g., <i>AI Engineer, Backend Developer, etc.</i>)\n"
+        "Please also mention location preference (e.g., <i>India, Remote, Bangalore, Hyderabad, etc.</i>).\n\n"
+        "<i>Note: If you don't mention a location, we will default to India + Remote.</i>"
     )
 
 

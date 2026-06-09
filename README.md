@@ -38,5 +38,3 @@ app/
     ├── tailor_graph.py         # Multi-agent Writer and Critic loop configuration
     └── evaluators.py           # Offline evaluation pipeline scripts
 ```
-
----

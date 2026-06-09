@@ -3,7 +3,7 @@ import json
 import uuid
 import logging
 from html import escape
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -98,11 +98,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
 
         logger.info(f"Successfully onboarding user {tg_id}")
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Fresher", callback_data="set_exp_Fresher"),
+                InlineKeyboardButton("0-1 year", callback_data="set_exp_0-1 year"),
+            ],
+            [
+                InlineKeyboardButton("1-3 years", callback_data="set_exp_1-3 years"),
+                InlineKeyboardButton("3-5 years", callback_data="set_exp_3-5 years"),
+            ],
+            [
+                InlineKeyboardButton("5+ years", callback_data="set_exp_5+ years")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await status_message.edit_text(
             f"✅ <b>Resume processed successfully!</b>\n\n"
             f"Welcome, <b>{parsed_name}</b>. Your profile has been semantically indexed.\n\n"
-            f"• Use /profile to view your parsed details\n"
-            f"• Use /jobs to find hyper-relevant job openings",
+            f"💼 <b>One last step:</b> Please select your experience level below to complete your profile:",
+            reply_markup=reply_markup,
             parse_mode="HTML"
         )
 
@@ -118,7 +134,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles inline keyboard button clicks for job details view and tailoring.
+    Handles inline keyboard button clicks for job details view, tailoring, experience onboarding, and deep refinement.
     """
     query = update.callback_query
     await query.answer()
@@ -127,7 +143,108 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     logger.info(f"Received callback query '{data}' from user {user_id}")
 
-    if data.startswith("job_view_"):
+    from app.core.database import redis_client
+    import hashlib
+
+    if data.startswith("set_exp_"):
+        selected_exp = data[len("set_exp_"):]
+        async with AsyncSessionLocal() as db:
+            from app.services.user_service import get_user_profile
+            user = await get_user_profile(db, user_id)
+            if user:
+                profile = user.extracted_profile or {}
+                profile["experience_level"] = selected_exp
+                user.extracted_profile = profile
+                
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(user, "extracted_profile")
+                await db.commit()
+                
+        await query.edit_message_text(
+            f"✅ <b>Experience level set to: {selected_exp}</b>\n\n"
+            "Your profile is now complete! Use /jobs to find matching roles.",
+            parse_mode="HTML"
+        )
+
+    elif data == "jobs_refine":
+        # Let's perform a deep AI rerank (bypassing the cooldown)
+        try:
+            user_query = await redis_client.get(f"user_last_query:{user_id}")
+            if user_query:
+                user_query = user_query.decode("utf-8") if isinstance(user_query, bytes) else user_query
+            else:
+                user_query = ""
+        except Exception as e:
+            logger.error(f"Failed to fetch last query from Redis: {e}")
+            user_query = ""
+
+        status_msg = await query.message.reply_html("🧠 <b>Running deep AI re-ranking (bypassing cooldown)...</b>")
+
+        try:
+            async with AsyncSessionLocal() as db:
+                from app.services.user_service import get_user_profile
+                user = await get_user_profile(db, user_id)
+
+                if not user or not user.extracted_profile or user.resume_embedding is None:
+                    await status_msg.edit_text(
+                        "❌ <b>No resume found.</b> Please upload your PDF resume first.",
+                        parse_mode="HTML"
+                    )
+                    return
+
+                from app.services.search import stage1_retrieval, stage2_rerank
+                # Fetch Top 10 candidates
+                candidates = await stage1_retrieval(user, db, limit=10, user_query=user_query)
+
+                if not candidates:
+                    await status_msg.edit_text(
+                        "🤷 <b>No matching jobs found in our database.</b>",
+                        parse_mode="HTML"
+                    )
+                    return
+
+                # Run rerank with refine=True to bypass cooldown
+                reranked = await stage2_rerank(user, candidates, user_query=user_query, refine=True)
+
+                top_results = reranked[:5]
+                await status_msg.delete()
+
+                await query.message.reply_html(
+                    f"💼 <b>Deep AI Job Recommendations:</b>"
+                )
+
+                for res in top_results:
+                    job = res["job"]
+                    evaluation = res["evaluation"]
+
+                    gaps = evaluation.skill_gaps
+                    gaps_str = ", ".join([f"<code>{escape(g)}</code>" for g in gaps]) if gaps else "<i>None identified!</i>"
+
+                    card_text = (
+                        f"🎯 <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n"
+                        f"📍 <b>Location:</b> {escape(job.location or 'Remote')}\n"
+                        f"📊 <b>Match Score:</b> <b>{evaluation.score}%</b>\n"
+                        f"💡 <b>Reasoning:</b> {escape(evaluation.reasoning)}\n"
+                        f"⚠️ <b>Key Skill Gaps:</b> {gaps_str}\n"
+                    )
+
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("🔍 View Details", callback_data=f"job_view_{job.id}"),
+                            InlineKeyboardButton("✨ Tailor Resume", callback_data=f"job_tailor_{job.id}")
+                        ]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await query.message.reply_html(card_text, reply_markup=reply_markup)
+
+        except Exception as e:
+            logger.error(f"Error during refine command flow: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ <b>Refine failed:</b> <code>{escape(str(e))}</code>",
+                parse_mode="HTML"
+            )
+
+    elif data.startswith("job_view_"):
         job_id_str = data[len("job_view_"):]
         try:
             job_uuid = uuid.UUID(job_id_str)
@@ -151,11 +268,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.message.reply_html("❌ <b>User profile not found.</b> Please upload a resume first.")
                 return
 
-            # 3. Retrieve or calculate match evaluation
+            # 3. Retrieve or calculate match evaluation using new smart cache key
             from app.services.search import JobMatchEvaluation, stage2_rerank
-            from app.core.database import redis_client
             
-            cache_key = f"job_eval:{user_id}:{job.id}"
+            exp_clean = (user.extracted_profile or {}).get("experience_level", "Fresher").strip().lower()
+            try:
+                user_query = await redis_client.get(f"user_last_query:{user_id}")
+                if user_query:
+                    user_query = user_query.decode("utf-8") if isinstance(user_query, bytes) else user_query
+                else:
+                    user_query = ""
+            except Exception:
+                user_query = ""
+            
+            cleaned_query = (user_query or "").strip().lower()
+            query_hash = hashlib.md5(cleaned_query.encode("utf-8")).hexdigest() if cleaned_query else "none"
+            cache_key = f"job_eval:{user_id}:{job.id}:{exp_clean}:{query_hash}"
+
             evaluation = None
             try:
                 cached_data = await redis_client.get(cache_key)
@@ -165,9 +294,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.warning(f"Failed to query Redis cache in callback: {e}")
 
             if not evaluation:
-                # If cache missed, run a quick one-off re-rank (should be rare)
                 try:
-                    reranked = await stage2_rerank(user, [job])
+                    reranked = await stage2_rerank(user, [job], user_query=user_query)
                     if reranked:
                         evaluation = reranked[0]["evaluation"]
                 except Exception as e:
@@ -196,7 +324,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"⚠️ <b>Key Gaps:</b> {gaps_str}"
             )
             
-            # Send as new message to keep conversation history neat
             await query.message.reply_html(detail_text)
 
     elif data.startswith("job_tailor_"):
@@ -232,15 +359,15 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     tg_id = update.effective_user.id
     from app.core.database import redis_client
     
-    # 1. Check user state in Redis
     try:
         user_state = await redis_client.get(f"user_state:{tg_id}")
+        if user_state:
+            user_state = user_state.decode("utf-8") if isinstance(user_state, bytes) else user_state
     except Exception as e:
         logger.error(f"Failed to fetch user state from Redis: {e}")
         user_state = None
 
     if user_state == "awaiting_role_pref":
-        # Clear the state so subsequent messages are not treated as preferences
         try:
             await redis_client.delete(f"user_state:{tg_id}")
         except Exception as e:
@@ -248,6 +375,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         user_query = update.message.text
         logger.info(f"User {tg_id} search preference: '{user_query}'")
+
+        # Save query to Redis so they can trigger "Refine Results"
+        try:
+            await redis_client.set(f"user_last_query:{tg_id}", user_query, ex=3600)
+        except Exception as e:
+            logger.error(f"Failed to save last query to Redis: {e}")
 
         status_msg = await update.message.reply_html("🔍 <b>Searching for matches using your resume & preferences...</b>")
 
@@ -266,8 +399,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 from app.services.search import stage1_retrieval, stage2_rerank
                 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-                # Step 1: Hybrid Lexical + Vector Retrieval (Top 20 candidates)
-                candidates = await stage1_retrieval(user, db, limit=20, user_query=user_query)
+                # Step 1: Hybrid Lexical + Vector Retrieval (Top 10 candidates instead of 20)
+                candidates = await stage1_retrieval(user, db, limit=10, user_query=user_query)
 
                 if not candidates:
                     await status_msg.edit_text(
@@ -276,9 +409,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                     return
 
+                # Check if cooldown is currently active
+                cooldown_active = False
+                try:
+                    cooldown_val = await redis_client.get(f"last_llm_rerank:{tg_id}")
+                    if cooldown_val:
+                        cooldown_active = True
+                except Exception:
+                    pass
+
                 # Step 2: LLM Reranking (passing the user query to the reranker)
                 await status_msg.edit_text("🧠 <b>Running AI match analysis and re-ranking...</b>", parse_mode="HTML")
-                reranked = await stage2_rerank(user, candidates, user_query=user_query)
+                reranked = await stage2_rerank(user, candidates, user_query=user_query, refine=False)
 
                 top_results = reranked[:5]
                 await status_msg.delete()
@@ -310,6 +452,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
                     await update.message.reply_html(card_text, reply_markup=reply_markup)
+
+                # Show Refine Results button if cooldown was triggered or if any of the results are fallback evaluations
+                has_fallback = any("cooldown active" in (res["evaluation"].reasoning or "").lower() for res in top_results)
+                
+                if cooldown_active or has_fallback:
+                    refine_keyboard = [
+                        [InlineKeyboardButton("🔄 Refine Results with AI", callback_data="jobs_refine")]
+                    ]
+                    refine_markup = InlineKeyboardMarkup(refine_keyboard)
+                    await update.message.reply_html(
+                        "⚠️ <b>Note:</b> You are seeing cached matches or keyword fallbacks due to the 4-hour AI rate limit.\n\n"
+                        "Click below to force a deep AI match evaluation and skill gap analysis.",
+                        reply_markup=refine_markup
+                    )
 
         except Exception as e:
             logger.error(f"Error during search command flow: {e}", exc_info=True)
