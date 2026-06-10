@@ -179,11 +179,195 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+import io
+import uuid
+from sqlalchemy import select
+from app.core.database import redis_client
+from app.models.schemas import Job
+from app.agents.tailor_graph import build_tailor_graph
+
+
+async def run_tailoring_flow(
+    user_id: int,
+    job_uuid: uuid.UUID,
+    context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Executes the resume tailoring pipeline: checks Redis cache, invokes LangGraph,
+    saves the output to cache, and sends the final PDF resume.
+    """
+    # 1. Start progress updates
+    status_msg = await context.bot.send_message(
+        chat_id=user_id,
+        text="🚀 <b>Initializing Multi-Agent Resume Tailoring Loop...</b>",
+        parse_mode="HTML"
+    )
+
+    async def update_status(text: str):
+        try:
+            await status_msg.edit_text(text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed to edit status message: {e}")
+
+    # 2. Fetch job details
+    async with AsyncSessionLocal() as db:
+        stmt = select(Job).where(Job.id == job_uuid)
+        res = await db.execute(stmt)
+        job = res.scalars().first()
+        if not job:
+            await update_status("❌ <b>Job not found in system.</b>")
+            return
+
+        # Fetch user profile
+        user = await get_user_profile(db, user_id)
+        if not user or not user.extracted_profile:
+            await update_status("❌ <b>User profile not found.</b> Please upload your PDF resume first.")
+            return
+
+        user_profile = user.extracted_profile
+
+    # 3. Check Redis cache for tailored resume PDF
+    cache_key = f"tailored_resume:{user_id}:{job.id}"
+    try:
+        cached_pdf = await redis_client.get(cache_key)
+        if cached_pdf:
+            logger.info(f"Cache HIT for tailored resume of user {user_id} and job {job.id}")
+            pdf_stream = io.BytesIO(cached_pdf)
+            pdf_stream.name = f"Resume_{job.company.replace(' ', '_')}.pdf"
+            
+            await update_status(
+                f"✨ <b>Tailored Resume Found (Cached):</b>\n"
+                f"Target: <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n\n"
+                f"Sending your customized PDF resume now..."
+            )
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=pdf_stream,
+                filename=pdf_stream.name,
+                caption=f"Tailored Resume: {job.title} - {job.company}"
+            )
+            return
+    except Exception as e:
+        logger.warning(f"Failed to check Redis cache for tailored resume: {e}")
+
+    # 4. Cache Miss: Start LangGraph process
+    job_dict = {
+        "id": str(job.id),
+        "title": job.title,
+        "company": job.company,
+        "description": job.description,
+        "requirements": job.requirements or ""
+    }
+
+    initial_state = {
+        "user_profile": user_profile,
+        "target_job": job_dict,
+        "current_draft": None,
+        "critique_feedback": None,
+        "score_history": [],
+        "final_resume": None,
+        "iteration_count": 0
+    }
+
+    try:
+        graph = build_tailor_graph()
+        # Pass update_status as the configurable status callback
+        config = {"configurable": {"status_callback": update_status}}
+        
+        final_state = await graph.ainvoke(initial_state, config=config)
+        
+        pdf_bytes = final_state.get("final_resume")
+        scores = final_state.get("score_history", [])
+        final_score = scores[-1] if scores else 85
+        
+        if not pdf_bytes:
+            await update_status("❌ <b>Compilation Failed.</b> Typst was unable to generate the PDF resume.")
+            return
+
+        # Cache final PDF in Redis for 7 days (604800 seconds)
+        try:
+            await redis_client.set(cache_key, pdf_bytes, ex=604800)
+            logger.info(f"Cached tailored resume for user {user_id} and job {job.id} (7 days TTL)")
+        except Exception as e:
+            logger.warning(f"Failed to cache tailored resume: {e}")
+
+        # Send success message & PDF document
+        await update_status(
+            f"✅ <b>Resume Tailored successfully!</b>\n"
+            f"📈 <b>Final ATS Score:</b> {final_score}%\n"
+            f"🔄 <b>Iterations Run:</b> {final_state.get('iteration_count', 1)}\n\n"
+            f"Sending document..."
+        )
+
+        pdf_stream = io.BytesIO(pdf_bytes)
+        pdf_stream.name = f"Resume_{job.company.replace(' ', '_')}.pdf"
+        
+        await context.bot.send_document(
+            chat_id=user_id,
+            document=pdf_stream,
+            filename=pdf_stream.name,
+            caption=f"🎯 Tailored Resume: {job.title} - {job.company} (ATS score: {final_score}%)"
+        )
+
+    except Exception as e:
+        logger.error(f"Tailoring workflow failed for user {user_id} and job {job.id}: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"❌ <b>Tailoring failed:</b> <code>{escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
+
+
 async def tailor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /tailor command. Initiates resume tailoring process.
+    Supports: /tailor <job_id>
+    If no job_id is provided, shows a list of recent jobs that can be tailored.
     """
-    await update.message.reply_text("✨ *Resume Tailoring Loop:*\n\n[Placeholder] Specify a target job context to run the multi-agent critique.", parse_mode="Markdown")
+    tg_id = update.effective_user.id
+    logger.info(f"Received /tailor command from user {tg_id}")
+
+    args = context.args
+    if args:
+        # User specified a Job UUID
+        job_id_str = args[0]
+        try:
+            job_uuid = uuid.UUID(job_id_str)
+        except ValueError:
+            await update.message.reply_html("❌ <b>Invalid Job ID format.</b> Please provide a valid UUID.")
+            return
+
+        await run_tailoring_flow(tg_id, job_uuid, context)
+        return
+
+    # No arguments: list latest jobs in system to tailor
+    async with AsyncSessionLocal() as db:
+        stmt = select(Job).order_by(Job.created_at.desc()).limit(3)
+        res = await db.execute(stmt)
+        jobs = res.scalars().all()
+
+        if not jobs:
+            await update.message.reply_html(
+                "❌ <b>No jobs found in the system database.</b>\n\n"
+                "Please run /jobs first to ingest and search for available openings."
+            )
+            return
+
+        keyboard = []
+        for job in jobs:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"✨ Tailor for {job.title[:20]} ({job.company[:15]})",
+                    callback_data=f"job_tailor_{job.id}"
+                )
+            ])
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_html(
+            "✨ <b>Resume Tailoring System</b>\n\n"
+            "Please select one of the latest job openings below to tailor your resume for, "
+            "or use /jobs to search for other roles and click the tailoring button directly on their cards:",
+            reply_markup=reply_markup
+        )
 
 
 async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

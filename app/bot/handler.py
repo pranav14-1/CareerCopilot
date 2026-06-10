@@ -334,21 +334,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_html("❌ <b>Invalid Job ID.</b>")
             return
 
-        async with AsyncSessionLocal() as db:
-            stmt = select(Job).where(Job.id == job_uuid)
-            res = await db.execute(stmt)
-            job = res.scalars().first()
-            if not job:
-                await query.message.reply_html("❌ <b>Job not found in system.</b>")
-                return
-
-            tailor_msg = (
-                f"✨ <b>Resume Tailoring Request received!</b>\n\n"
-                f"Targeting: <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n\n"
-                f"I will now pass your resume and this job opening to our Multi-Agent Critique System to "
-                f"rewrite and align your details. In Phase 3, this will compile a professional, tailored PDF resume."
-            )
-            await query.message.reply_html(tailor_msg)
+        from app.bot.commands import run_tailoring_flow
+        await run_tailoring_flow(user_id, job_uuid, context)
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
