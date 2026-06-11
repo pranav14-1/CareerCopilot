@@ -374,7 +374,140 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     Handle the /learn command. Evaluates skill gaps and outputs roadmap.
     """
-    await update.message.reply_text("🛠️ *Skill Gap Roadmap:*\n\n[Placeholder] Calculating vector deltas between your skills and the market...", parse_mode="Markdown")
+    tg_id = update.effective_user.id
+    logger.info(f"Received /learn command from user {tg_id}")
+
+    # 1. Fetch user profile
+    async with AsyncSessionLocal() as db:
+        user = await get_user_profile(db, tg_id)
+        if not user or not user.extracted_profile:
+            await update.message.reply_html(
+                "❌ <b>No resume profile found.</b>\n\n"
+                "Please upload your resume as a <b>PDF document</b> first so I can analyze your skills!"
+            )
+            return
+
+        user_profile = user.extracted_profile
+
+    # 2. Check Redis cache for cached skill gap report
+    cache_key = f"skill_gap:{tg_id}"
+    try:
+        import json
+        cached_data = await redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Cache HIT for skill gap report of user {tg_id}")
+            result = json.loads(cached_data)
+            
+            # Format and send long message
+            html_content = format_skill_gap_html(result)
+            await send_long_message(context.bot, tg_id, html_content)
+            return
+    except Exception as e:
+        logger.warning(f"Failed to check Redis cache for skill gap: {e}")
+
+    # 3. Cache Miss: Show loading message and call service
+    status_msg = await update.message.reply_html(
+        "🛠️ <b>Analyzing your skills against the current job market...</b>\n"
+        "<i>This will only take a moment.</i>"
+    )
+
+    try:
+        from app.services.skill_gap import analyze_skill_gaps
+        
+        async with AsyncSessionLocal() as db:
+            result = await analyze_skill_gaps(user_profile, db)
+            
+        # Cache results in Redis for 48 hours (172800 seconds)
+        try:
+            await redis_client.set(cache_key, json.dumps(result), ex=172800)
+            logger.info(f"Cached skill gap report for user {tg_id} (48 hours TTL)")
+        except Exception as e:
+            logger.warning(f"Failed to cache skill gap report: {e}")
+
+        # Delete status message and send formatted report
+        try:
+            await context.bot.delete_message(chat_id=tg_id, message_id=status_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete status message: {e}")
+
+        html_content = format_skill_gap_html(result)
+        await send_long_message(context.bot, tg_id, html_content)
+
+    except Exception as e:
+        logger.error(f"Skill gap analysis failed for user {tg_id}: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"❌ <b>Skill Gap analysis failed:</b> <code>{escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
+
+
+def format_skill_gap_html(result: dict) -> str:
+    """Formats the skill gap JSON result into engaging HTML for Telegram."""
+    gaps = result.get("gaps", [])
+    weekly_plan = result.get("weekly_plan", [])
+    projects = result.get("suggested_projects", [])
+    
+    html = "🛠️ <b>Personalized Skill Gap & Learning Roadmap</b>\n\n"
+    
+    html += "🎯 <b>Top Identified Gaps:</b>\n"
+    for item in gaps:
+        priority = item.get("priority", "Medium").lower()
+        if "high" in priority:
+            emoji = "🔴"
+        elif "medium" in priority:
+            emoji = "🟡"
+        else:
+            emoji = "🟢"
+        
+        html += f"{emoji} <b>{escape(item.get('skill', ''))}</b> (Priority: {item.get('priority', 'Medium')})\n"
+        html += f"   <i>Why: {escape(item.get('importance', ''))}</i>\n\n"
+        
+    html += "📅 <b>Weekly Learning Plan:</b>\n"
+    for week in weekly_plan:
+        html += f"<b>{escape(week.get('week', ''))}</b>: {escape(week.get('focus', ''))}\n"
+        html += "• <i>Action Items:</i>\n"
+        for act in week.get("action_items", []):
+            html += f"  - {escape(act)}\n"
+        html += "• <i>Resources:</i>\n"
+        for res in week.get("resources", []):
+            html += f"  - {escape(res)}\n"
+        html += "\n"
+        
+    html += "🚀 <b>Suggested Projects to Build:</b>\n"
+    for proj in projects:
+        html += f"💡 <b>{escape(proj.get('title', ''))}</b>\n"
+        html += f"   {escape(proj.get('description', ''))}\n"
+        html += "   <i>Key Deliverables:</i>\n"
+        for deliv in proj.get("key_deliverables", []):
+            html += f"   - {escape(deliv)}\n"
+        html += "\n"
+        
+    html += "💪 <i>Stay consistent and build every day. You've got this!</i>"
+    return html
+
+
+async def send_long_message(bot, chat_id: int, text: str, parse_mode: str = "HTML") -> None:
+    """Helper to split and send messages exceeding Telegram's 4096 char limit."""
+    if len(text) <= 4096:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        return
+        
+    parts = []
+    current_part = ""
+    for line in text.split("\n"):
+        if len(current_part) + len(line) + 1 > 4096:
+            parts.append(current_part)
+            current_part = line
+        else:
+            if current_part:
+                current_part += "\n" + line
+            else:
+                current_part = line
+    if current_part:
+        parts.append(current_part)
+        
+    for part in parts:
+        await bot.send_message(chat_id=chat_id, text=part, parse_mode=parse_mode)
 
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

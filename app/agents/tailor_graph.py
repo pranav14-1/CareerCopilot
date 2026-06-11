@@ -102,7 +102,6 @@ async def writer_agent(state: TailorState, config: Optional[Dict[str, Any]] = No
 
     try:
         response, raw = await instructor_client.create_with_completion(
-            model="google/gemini-1.5-flash",
             response_model=ResumeDraft,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -196,7 +195,6 @@ async def ats_critic_agent(state: TailorState, config: Optional[Dict[str, Any]] 
 
     try:
         response, raw = await instructor_client.create_with_completion(
-            model="google/gemini-1.5-flash",
             response_model=CritiqueResult,
             messages=[
                 {"role": "system", "content": system_prompt},
