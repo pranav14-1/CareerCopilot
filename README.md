@@ -1,79 +1,65 @@
-# CareerCopilot
+# AI Career Copilot
 
-## 📚 Project Overview
-CareerCopilot is an **AI‑powered Telegram assistant** that helps BTech students and early‑career engineers discover, evaluate, and tailor technology job opportunities, with a focus on high‑quality Indian tech portals. It turns a raw PDF resume into a structured profile, performs hybrid lexical‑semantic search, and uses a large language model (Gemini‑1.5‑flash) to evaluate relevance, suggest skill‑gap roadmaps, and generate a customized resume for any selected job.
+**A Production-Grade Agentic AI Assistant for Job Search and Career Development**
 
----
+AI Career Copilot is a Telegram-based intelligent system built to streamline the end-to-end job hunting process. It combines semantic understanding, hybrid search, and multi-agent AI orchestration to deliver highly relevant job opportunities and personalized resume optimization.
 
-## 🚀 Core Capabilities
-- **Resume Ingestion** – Users upload a PDF; the system parses the document, extracts a structured profile, and creates a 768‑dimensional embedding for semantic search.
-- **Two‑Stage Hybrid Search** – BM25 lexical retrieval + pgvector semantic retrieval, merged with Reciprocal Rank Fusion (RRF). Explicit role/keyword and location signals receive extra weighting; Indian portals (Instahyre, Cutshort, Hirist) receive a dedicated boost.
-- **AI‑Driven Evaluation** – Gemini‑1.5‑flash evaluates each candidate job, producing a `JobMatchEvaluation` (score, reasoning, skill‑gap list).
-- **Skill‑Gap Roadmaps** – Automatically suggests missing skills and learning resources based on the profile‑to‑job gap analysis.
-- **Resume Tailoring Agent** – A LangGraph multi‑agent graph extracts required skills, identifies gaps, and generates a customized PDF resume for any selected job.
-- **Observability** – OpenTelemetry instrumentation, latency histograms, operation counters, and optional LangSmith tracing give full visibility into request flow and performance.
+## Project Overview
 
----
+This project transforms a basic chatbot into a complete agentic AI system capable of:
 
-## 🏗️ Architecture Snapshot
-```
-CareerCopilot
-│
-├─ app/
-│   ├─ core/            # Config, DB engine, OpenTelemetry helpers
-│   ├─ models/          # SQLAlchemy schemas (User, Job, etc.)
-│   ├─ services/        # job_ingester, search, parser, analytics
-│   ├─ agents/          # LangGraph resume‑tailor workflow
-│   ├─ bot/             # Telegram command & message handlers
-│   └─ main.py          # FastAPI entry point & bot startup logic
-│
-├─ docker-compose.yml  # DB, Redis, FastAPI containers (production ready)
-└─ README.md           # (this file)
-```
-* **FastAPI** serves the HTTP API and hosts background jobs.
-* **Telegram Bot** (python‑telegram‑bot) interacts with users, routing commands to the service layer.
-* **Job Ingester** scrapes Instahyre, Cutshort.io, and Hirist.tech using Playwright with stealth, random delays, and strict field truncation to keep the database stable.
-* **Search Service** performs the hybrid retrieval and RRF fusion, applying location and portal boosts before passing candidates to the LLM reranker.
-* **User Service** stores the extracted profile, embedding, and experience level in PostgreSQL.
-* **Analytics** records operation latency and counts in Redis/OpenTelemetry for monitoring.
+- Ingesting and structuring resumes from PDF documents
+- Performing intelligent job discovery using hybrid lexical and vector search
+- Running a multi-agent critique loop to iteratively tailor resumes for specific roles
+- Analyzing skill gaps against the current job market
+- Delivering personalized technology briefings
 
----
+The system is designed with production-grade architecture, emphasizing reliability, observability, and cost efficiency.
 
-## 🔍 Search & Ranking Details
-1. **Stage 1 – Retrieval**
-   - BM25 lexical index over job title/description.
-   - pgvector semantic index over embedding vectors.
-   - Top‑5 candidates from each source are merged.
-2. **Stage 2 – Rerank**
-   - Gemini LLM evaluates each candidate, producing a score (0‑100), reasoning, and a list of missing skills.
-3. **RRF Fusion**
-   - Scores from lexical, semantic, and preference (role/keyword) paths are combined.
-   - Multipliers: 2× for explicit role/keyword, +0.15 for location match, +0.15 portal boost for Indian sources.
-4. **Result Presentation**
-   - Telegram messages display job title, company, location, match score, reasoning, and identified skill gaps, with inline buttons for detail view or resume tailoring.
+## Core Capabilities
 
----
+### Semantic Onboarding
+- Parses PDF resumes in memory using pdfplumber
+- Extracts structured profile data using Gemini + Instructor with strict Pydantic validation
+- Generates 768-dimensional embeddings and stores profiles in PostgreSQL with pgvector
 
-## 🤖 Agentic Resume Tailoring Workflow
-The LangGraph graph orchestrates four sequential steps:
-1. **Skill Extraction** – Pull required skills from the selected job posting.
-2. **Gap Identification** – Compare required skills with the user's extracted profile.
-3. **Prompt Construction** – Build a detailed LLM prompt that includes the gap list and the original resume.
-4. **PDF Generation** – Gemini generates a tailored resume PDF, cached in Redis for fast reuse.
+### Two-Stage Hybrid Job Search
+- Combines BM25 full-text search with semantic vector similarity for fast retrieval
+- LLM-powered reranking with detailed reasoning and skill-gap analysis
+- India-focused job ingestion from platforms including Instahyre, Cutshort, Hirist, and public APIs
 
----
+### Multi-Agent Resume Tailoring
+- Built using LangGraph, featuring two specialized agents:
+  - **Writer Agent**: Crafts tailored resume sections based on target job descriptions
+  - **ATS Critic Agent**: Evaluates alignment (0-100 score) and provides actionable feedback
+- Iterative critique loop continues until the resume meets high standards or maximum iterations are reached
+- Final output compiled into clean, professional PDFs using Typst
 
-## 📈 Observability & Metrics
-- **OpenTelemetry** – Traces each API call and bot interaction; optional OTLP exporter for external back‑ends.
-- **Metrics** – Histograms for query latency, counters for `job_search`, `resume_tailor`, and other core operations.
-- **Redis** – Stores transient state (user query, experience level) and cached evaluations to avoid re‑computations.
+### Additional Intelligence
+- Skill gap analysis comparing user profile against active job market requirements
+- Personalized weekly learning roadmaps
+- Automated tech news aggregation and summarization
+
+### Production Features
+- Full async architecture with FastAPI
+- Redis caching for performance and cost optimization
+- Comprehensive observability using OpenTelemetry and LangSmith
+- Robust error handling and multi-tenancy isolation
+
+## Technical Architecture
+
+- **Backend**: FastAPI (async), SQLAlchemy + asyncpg
+- **Agent Framework**: LangGraph (StateGraph with conditional routing)
+- **AI Layer**: Gemini 1.5 Flash + Instructor for structured outputs
+- **Vector Database**: PostgreSQL 16 + pgvector
+- **Document Engine**: Typst for high-quality PDF generation
+- **Scraping**: Playwright (responsible, rate-limited usage)
+- **Monitoring**: OpenTelemetry, LangSmith
+
+## Key Learnings & Highlights
+
+This project served as a deep dive into building agentic AI systems. The multi-agent resume tailoring workflow demonstrates practical implementation of autonomous AI collaboration, state management, and iterative reasoning — core concepts in modern agentic AI development.
+
+The system reflects production thinking through proper caching strategies, observability, async design, and cost-aware LLM usage.
 
 ---
-
-## 🛠️ Extensibility
-- **Add New Sources** – Extend `SCRAPING_SOURCES` in `.env` and implement a Playwright scraper in `app/services/job_ingester.py`.
-- **Custom Boosts** – Adjust RRF weighting constants in `app/services/search.py` to prioritize different portals or attributes.
-- **Plug‑In New Agents** – Create additional LangGraph graphs for tasks such as interview question generation or salary negotiation assistance.
-
----
-
