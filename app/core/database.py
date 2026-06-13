@@ -79,7 +79,7 @@ async def verify_redis_connection() -> bool:
 async def init_db() -> None:
     """
     Creates all database tables defined in the declarative schema.
-    Also ensures the pgvector extension is created in the database.
+    Also ensures the pgvector extension is created and migrates necessary fields.
     """
     from app.models.schemas import Base
     from sqlalchemy import text
@@ -87,7 +87,9 @@ async def init_db() -> None:
         async with async_engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables successfully initialized with pgvector.")
+            # Add url column if it doesn't exist to support deduplication
+            await conn.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS url VARCHAR(512)"))
+        logger.info("Database tables successfully initialized with pgvector and schema migrations.")
     except Exception as e:
         logger.error(f"Failed to initialize database tables: {e}")
         raise

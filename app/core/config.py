@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME: str = "career-copilot"
     OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
 
+    # --- Scraping Configurations ---
+    ENABLE_SCRAPING: bool = False
+    SCRAPING_MAX_JOBS: int = 25
+    SCRAPING_TARGETS: list[str] = ["instahyre"]
+    SCRAPING_SOURCES: list[str] = ["instahyre", "cutshort", "hirist"]
+
     @field_validator("DATABASE_URL")
     @classmethod
     def validate_database_url(cls, v: str) -> str:

@@ -28,7 +28,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/tailor - Adapt your resume for a job\n"
         "/learn - Generate missing skill roadmaps\n"
         "/news - View personalized tech briefings\n"
-        "/remind - Add natural language reminders\n"
         "/stats - View system trace and cost statistics"
     )
     await update.message.reply_html(welcome_text)
@@ -173,9 +172,8 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await update.message.reply_html(
         "🔍 <b>Conversational Job Search</b>\n\n"
-        "What kind of role are you targeting? (e.g., <i>AI Engineer, Backend Developer, etc.</i>)\n"
-        "Please also mention location preference (e.g., <i>India, Remote, Bangalore, Hyderabad, etc.</i>).\n\n"
-        "<i>Note: If you don't mention a location, we will default to India + Remote.</i>"
+        "What kind of role and location are you targeting? (e.g., <i>AI Engineer in Bangalore</i>, <i>Backend Developer in India</i>, or <i>SDE Remote</i>)\n\n"
+        "<i>Note: If you don't specify a location, we will automatically default to India + Remote.</i>"
     )
 
 
@@ -269,10 +267,12 @@ async def run_tailoring_flow(
         "iteration_count": 0
     }
 
+    import time
+    start_time = time.time()
     try:
         graph = build_tailor_graph()
-        # Pass update_status as the configurable status callback
-        config = {"configurable": {"status_callback": update_status}}
+        # Pass update_status and user_id as configurable status callbacks/contexts
+        config = {"configurable": {"status_callback": update_status, "user_id": user_id}}
         
         final_state = await graph.ainvoke(initial_state, config=config)
         
@@ -308,6 +308,10 @@ async def run_tailoring_flow(
             filename=pdf_stream.name,
             caption=f"🎯 Tailored Resume: {job.title} - {job.company} (ATS score: {final_score}%)"
         )
+
+        from app.services.analytics import track_event
+        duration_ms = (time.time() - start_time) * 1000
+        await track_event(user_id, "resume_tailor", duration_ms)
 
     except Exception as e:
         logger.error(f"Tailoring workflow failed for user {user_id} and job {job.id}: {e}", exc_info=True)
@@ -406,6 +410,8 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.warning(f"Failed to check Redis cache for skill gap: {e}")
 
     # 3. Cache Miss: Show loading message and call service
+    import time
+    start_time = time.time()
     status_msg = await update.message.reply_html(
         "🛠️ <b>Analyzing your skills against the current job market...</b>\n"
         "<i>This will only take a moment.</i>"
@@ -415,7 +421,7 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         from app.services.skill_gap import analyze_skill_gaps
         
         async with AsyncSessionLocal() as db:
-            result = await analyze_skill_gaps(user_profile, db)
+            result = await analyze_skill_gaps(user_profile, db, tg_id)
             
         # Cache results in Redis for 48 hours (172800 seconds)
         try:
@@ -432,6 +438,10 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         html_content = format_skill_gap_html(result)
         await send_long_message(context.bot, tg_id, html_content)
+
+        from app.services.analytics import track_event
+        duration_ms = (time.time() - start_time) * 1000
+        await track_event(tg_id, "skill_gap", duration_ms)
 
     except Exception as e:
         logger.error(f"Skill gap analysis failed for user {tg_id}: {e}", exc_info=True)
@@ -512,9 +522,104 @@ async def send_long_message(bot, chat_id: int, text: str, parse_mode: str = "HTM
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle the /news command. Shows tech briefings.
+    Handle the /news command. Shows personalized tech briefings.
     """
-    await update.message.reply_text("📰 *Tailored Tech Briefing:*\n\n[Placeholder] Loading latest articles and Hacker News feeds...", parse_mode="Markdown")
+    tg_id = update.effective_user.id
+    logger.info(f"Received /news command from user {tg_id}")
+
+    # 1. Fetch user profile
+    async with AsyncSessionLocal() as db:
+        user = await get_user_profile(db, tg_id)
+        if not user or not user.extracted_profile:
+            await update.message.reply_html(
+                "❌ <b>No resume profile found.</b>\n\n"
+                "Please upload your resume as a <b>PDF document</b> first so I can tailor the news briefings to your skills!"
+            )
+            return
+
+        user_profile = user.extracted_profile
+
+    # 2. Check Redis cache
+    cache_key = f"news_briefing:{tg_id}"
+    try:
+        import json
+        cached_data = await redis_client.get(cache_key)
+        if cached_data:
+            logger.info(f"Cache HIT for news briefing of user {tg_id}")
+            result = json.loads(cached_data)
+            html_content = format_news_html(result)
+            await send_long_message(context.bot, tg_id, html_content)
+            return
+    except Exception as e:
+        logger.warning(f"Failed to check Redis cache for news briefing: {e}")
+
+    # 3. Cache Miss: Show loading message
+    import time
+    start_time = time.time()
+    status_msg = await update.message.reply_html(
+        "📰 <b>Gathering latest tech updates and tailoring to your profile...</b>\n"
+        "<i>Analyzing Hacker News, subreddits, and top blogs.</i>"
+    )
+
+    try:
+        from app.services.news_summarizer import get_personalized_briefing
+        
+        async with AsyncSessionLocal() as db:
+            result = await get_personalized_briefing(user_profile, db, tg_id)
+            
+        # Cache results in Redis for 12 hours (43200 seconds)
+        try:
+            await redis_client.set(cache_key, json.dumps(result), ex=43200)
+            logger.info(f"Cached news briefing for user {tg_id} (12 hours TTL)")
+        except Exception as e:
+            logger.warning(f"Failed to cache news briefing: {e}")
+
+        # Delete loading message and send tech briefing
+        try:
+            await context.bot.delete_message(chat_id=tg_id, message_id=status_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete status message: {e}")
+
+        html_content = format_news_html(result)
+        await send_long_message(context.bot, tg_id, html_content)
+
+        from app.services.analytics import track_event
+        duration_ms = (time.time() - start_time) * 1000
+        await track_event(tg_id, "news_briefing", duration_ms)
+
+    except Exception as e:
+        logger.error(f"News briefing generation failed for user {tg_id}: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"❌ <b>News briefing failed:</b> <code>{escape(str(e))}</code>",
+            parse_mode="HTML"
+        )
+
+
+def format_news_html(result: dict) -> str:
+    """Formats the news briefing JSON result into engaging HTML for Telegram."""
+    stories = result.get("stories", [])
+    if not stories:
+        return (
+            "📰 <b>Tailored Tech Briefing</b>\n\n"
+            "No news articles are currently available. Please try again later or verify that background news ingestion is running."
+        )
+        
+    html = "📰 <b>Tailored Tech Briefing</b>\n\n"
+    html += "Here is your personalized tech briefing based on your profile and interests:\n\n"
+    
+    for idx, story in enumerate(stories):
+        title = story.get("title", "News Update")
+        url = story.get("url", "#")
+        summary = story.get("summary", "")
+        source = story.get("source", "Web")
+        relevance = story.get("relevance", "")
+        
+        html += f"<b>{idx+1}. <a href=\"{escape(url)}\">{escape(title)}</a></b> ({escape(source)})\n"
+        html += f"📝 {escape(summary)}\n"
+        html += f"🧠 <i>Why relevant: {escape(relevance)}</i>\n\n"
+        
+    html += "✨ <i>Stay ahead in tech! Run /news anytime for updates.</i>"
+    return html
 
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -528,4 +633,64 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     Handle the /stats command. Shows observability diagnostics.
     """
-    await update.message.reply_text("📊 *Observability & Token Stats:*\n\n[Placeholder] Request latency and financial metrics...", parse_mode="Markdown")
+    tg_id = update.effective_user.id
+    logger.info(f"Received /stats command from user {tg_id}")
+
+    from app.services.analytics import get_system_stats, get_user_stats
+    from sqlalchemy import text
+    import time
+
+    # 1. Health checks
+    db_healthy = False
+    db_latency_ms = 0.0
+    try:
+        start_db = time.time()
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        db_latency_ms = (time.time() - start_db) * 1000
+        db_healthy = True
+    except Exception as e:
+        logger.error(f"PostgreSQL health check failed: {e}")
+
+    redis_healthy = False
+    redis_latency_ms = 0.0
+    try:
+        start_redis = time.time()
+        await redis_client.ping()
+        redis_latency_ms = (time.time() - start_redis) * 1000
+        redis_healthy = True
+    except Exception as e:
+        logger.error(f"Redis health check failed: {e}")
+
+    # 2. Retrieve Stats
+    user_stats = await get_user_stats(tg_id)
+    system_stats = await get_system_stats()
+
+    # 3. Format beautiful HTML message
+    html = "📊 <b>CareerCopilot Metrics & Diagnostics</b>\n\n"
+    
+    html += "👤 <b>Your Analytics:</b>\n"
+    html += f"  • Jobs Searched: <code>{user_stats.get('jobs_searched', 0)}</code>\n"
+    html += f"  • Resumes Tailored: <code>{user_stats.get('resumes_tailored', 0)}</code>\n"
+    html += f"  • Skill Gaps Run: <code>{user_stats.get('skill_gaps_analyzed', 0)}</code>\n"
+    html += f"  • News Briefings: <code>{user_stats.get('news_briefings_generated', 0)}</code>\n"
+    html += f"  • Total LLM Tokens: <code>{user_stats.get('total_tokens', 0)}</code>\n"
+    html += f"  • Estimated LLM Cost: <code>${user_stats.get('estimated_cost_usd', 0.0):.5f}</code>\n"
+    html += f"  • Avg Latency: <code>{user_stats.get('avg_latency_ms', 0.0):.1f}ms</code>\n\n"
+
+    html += "⚙️ <b>System-Wide Analytics:</b>\n"
+    html += f"  • Jobs Searched: <code>{system_stats.get('jobs_searched', 0)}</code>\n"
+    html += f"  • Resumes Tailored: <code>{system_stats.get('resumes_tailored', 0)}</code>\n"
+    html += f"  • Skill Gaps Run: <code>{system_stats.get('skill_gaps_analyzed', 0)}</code>\n"
+    html += f"  • News Briefings: <code>{system_stats.get('news_briefings_generated', 0)}</code>\n"
+    html += f"  • Total LLM Tokens: <code>{system_stats.get('total_tokens', 0)}</code>\n"
+    html += f"  • Estimated LLM Cost: <code>${system_stats.get('estimated_cost_usd', 0.0):.4f}</code>\n"
+    html += f"  • Avg Latency: <code>{system_stats.get('avg_latency_ms', 0.0):.1f}ms</code>\n\n"
+
+    html += "🏥 <b>Deployment Health:</b>\n"
+    db_status = f"🟢 Healthy ({db_latency_ms:.1f}ms)" if db_healthy else "🔴 Unhealthy"
+    redis_status = f"🟢 Healthy ({redis_latency_ms:.1f}ms)" if redis_healthy else "🔴 Unhealthy"
+    html += f"  • PostgreSQL: {db_status}\n"
+    html += f"  • Redis Cache: {redis_status}\n"
+
+    await update.message.reply_html(html)

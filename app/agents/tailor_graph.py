@@ -53,7 +53,7 @@ async def writer_agent(state: TailorState, config: Optional[Dict[str, Any]] = No
         await callback(f"✍️ <b>[Iteration {iteration}/3]</b> Writer Agent is tailoring resume sections...")
 
     instructor_client = instructor.from_provider(
-        "google/gemini-1.5-flash",
+        "google/gemini-2.5-flash",
         async_client=True,
     )
 
@@ -118,6 +118,19 @@ async def writer_agent(state: TailorState, config: Optional[Dict[str, Any]] = No
                 f"Completion tokens: {usage.candidates_token_count}, "
                 f"Total: {usage.total_token_count}"
             )
+            try:
+                user_id = config.get("configurable", {}).get("user_id") if config else None
+                if user_id:
+                    from app.services.analytics import track_event
+                    await track_event(
+                        user_id=user_id,
+                        event_type="tailor_llm_call",
+                        latency_ms=0.0,
+                        prompt_tokens=usage.prompt_token_count,
+                        completion_tokens=usage.candidates_token_count
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to track writer agent metrics: {e}")
 
         state["current_draft"] = response.model_dump()
     except Exception as e:
@@ -169,7 +182,7 @@ async def ats_critic_agent(state: TailorState, config: Optional[Dict[str, Any]] 
         await callback(f"📊 <b>[Iteration {iteration}/3]</b> ATS Critic is evaluating draft alignment...")
 
     instructor_client = instructor.from_provider(
-        "google/gemini-1.5-flash",
+        "google/gemini-2.5-flash",
         async_client=True,
     )
 
@@ -211,6 +224,19 @@ async def ats_critic_agent(state: TailorState, config: Optional[Dict[str, Any]] 
                 f"Completion tokens: {usage.candidates_token_count}, "
                 f"Total: {usage.total_token_count}"
             )
+            try:
+                user_id = config.get("configurable", {}).get("user_id") if config else None
+                if user_id:
+                    from app.services.analytics import track_event
+                    await track_event(
+                        user_id=user_id,
+                        event_type="tailor_llm_call",
+                        latency_ms=0.0,
+                        prompt_tokens=usage.prompt_token_count,
+                        completion_tokens=usage.candidates_token_count
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to track critic agent metrics: {e}")
 
         state["critique_feedback"] = response.feedback
         state["score_history"].append(response.score)

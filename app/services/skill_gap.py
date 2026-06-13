@@ -36,7 +36,7 @@ class SkillGapRoadmap(BaseModel):
     suggested_projects: List[SuggestedProject] = Field(..., description="1-2 suggested practical projects to bridge the gaps")
 
 
-async def analyze_skill_gaps(user_profile: Dict[str, Any], db) -> Dict[str, Any]:
+async def analyze_skill_gaps(user_profile: Dict[str, Any], db, user_id: int) -> Dict[str, Any]:
     """
     Compares the candidate profile against job postings in the database,
     identifies top skill gaps, and generates a personalized learning roadmap.
@@ -67,7 +67,7 @@ async def analyze_skill_gaps(user_profile: Dict[str, Any], db) -> Dict[str, Any]
 
     logger.info("Initializing Instructor for skill gap analysis...")
     instructor_client = instructor.from_provider(
-        "google/gemini-1.5-flash",
+        "google/gemini-2.5-flash",
         async_client=True,
     )
     
@@ -88,6 +88,10 @@ async def analyze_skill_gaps(user_profile: Dict[str, Any], db) -> Dict[str, Any]
     )
     
     try:
+        import time
+        from app.services.analytics import track_event
+
+        start_time = time.time()
         response, raw = await instructor_client.create_with_completion(
             response_model=SkillGapRoadmap,
             messages=[
@@ -96,6 +100,7 @@ async def analyze_skill_gaps(user_profile: Dict[str, Any], db) -> Dict[str, Any]
             ],
             validation_context={"temperature": 0.2}
         )
+        duration_ms = (time.time() - start_time) * 1000
         
         # Log Token Usage
         usage = getattr(raw, "usage_metadata", None)
@@ -104,6 +109,13 @@ async def analyze_skill_gaps(user_profile: Dict[str, Any], db) -> Dict[str, Any]
                 f"[Skill Gap] Prompt tokens: {usage.prompt_token_count}, "
                 f"Completion tokens: {usage.candidates_token_count}, "
                 f"Total: {usage.total_token_count}"
+            )
+            await track_event(
+                user_id=user_id,
+                event_type="skill_gap_llm_call",
+                latency_ms=duration_ms,
+                prompt_tokens=usage.prompt_token_count,
+                completion_tokens=usage.candidates_token_count
             )
             
         return response.model_dump()

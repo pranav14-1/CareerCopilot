@@ -193,8 +193,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     return
 
                 from app.services.search import stage1_retrieval, stage2_rerank
-                # Fetch Top 10 candidates
-                candidates = await stage1_retrieval(user, db, limit=10, user_query=user_query)
+                import time
+                start_time = time.time()
+                # Fetch Top 5 candidates for low latency
+                candidates = await stage1_retrieval(user, db, limit=5, user_query=user_query)
 
                 if not candidates:
                     await status_msg.edit_text(
@@ -206,36 +208,47 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 # Run rerank with refine=True to bypass cooldown
                 reranked = await stage2_rerank(user, candidates, user_query=user_query, refine=True)
 
+                # Display the top reranked jobs
                 top_results = reranked[:5]
                 await status_msg.delete()
 
-                await query.message.reply_html(
-                    f"💼 <b>Deep AI Job Recommendations:</b>"
-                )
-
-                for res in top_results:
-                    job = res["job"]
-                    evaluation = res["evaluation"]
-
-                    gaps = evaluation.skill_gaps
-                    gaps_str = ", ".join([f"<code>{escape(g)}</code>" for g in gaps]) if gaps else "<i>None identified!</i>"
-
-                    card_text = (
-                        f"🎯 <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n"
-                        f"📍 <b>Location:</b> {escape(job.location or 'Remote')}\n"
-                        f"📊 <b>Match Score:</b> <b>{evaluation.score}%</b>\n"
-                        f"💡 <b>Reasoning:</b> {escape(evaluation.reasoning)}\n"
-                        f"⚠️ <b>Key Skill Gaps:</b> {gaps_str}\n"
+                if not top_results:
+                    await query.message.reply_html(
+                        "🤷 <b>No matching jobs found.</b>\n"
+                        "Try refining your search keyword or profile details."
+                    )
+                else:
+                    await query.message.reply_html(
+                        f"💼 <b>Deep AI Job Recommendations:</b>"
                     )
 
-                    keyboard = [
-                        [
-                            InlineKeyboardButton("🔍 View Details", callback_data=f"job_view_{job.id}"),
-                            InlineKeyboardButton("✨ Tailor Resume", callback_data=f"job_tailor_{job.id}")
+                    for res in top_results:
+                        job = res["job"]
+                        evaluation = res["evaluation"]
+
+                        gaps = evaluation.skill_gaps
+                        gaps_str = ", ".join([f"<code>{escape(g)}</code>" for g in gaps]) if gaps else "<i>None identified!</i>"
+
+                        card_text = (
+                            f"🎯 <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n"
+                            f"📍 <b>Location:</b> {escape(job.location or 'Remote')}\n"
+                            f"📊 <b>Match Score:</b> <b>{evaluation.score}%</b>\n"
+                            f"💡 <b>Reasoning:</b> {escape(evaluation.reasoning)}\n"
+                            f"⚠️ <b>Key Skill Gaps:</b> {gaps_str}\n"
+                        )
+
+                        keyboard = [
+                            [
+                                InlineKeyboardButton("🔍 View Details", callback_data=f"job_view_{job.id}"),
+                                InlineKeyboardButton("✨ Tailor Resume", callback_data=f"job_tailor_{job.id}")
+                            ]
                         ]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await query.message.reply_html(card_text, reply_markup=reply_markup)
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        await query.message.reply_html(card_text, reply_markup=reply_markup)
+
+                from app.services.analytics import track_event
+                latency = (time.time() - start_time) * 1000
+                await track_event(user_id, "job_search", latency)
 
         except Exception as e:
             logger.error(f"Error during refine command flow: {e}", exc_info=True)
@@ -369,6 +382,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             logger.error(f"Failed to save last query to Redis: {e}")
 
+        import time
+        start_time = time.time()
         status_msg = await update.message.reply_html("🔍 <b>Searching for matches using your resume & preferences...</b>")
 
         try:
@@ -386,8 +401,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 from app.services.search import stage1_retrieval, stage2_rerank
                 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-                # Step 1: Hybrid Lexical + Vector Retrieval (Top 10 candidates instead of 20)
-                candidates = await stage1_retrieval(user, db, limit=10, user_query=user_query)
+                # Step 1: Hybrid Lexical + Vector Retrieval (Top 5 candidates for low latency)
+                candidates = await stage1_retrieval(user, db, limit=5, user_query=user_query)
 
                 if not candidates:
                     await status_msg.edit_text(
@@ -396,63 +411,55 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                     return
 
-                # Check if cooldown is currently active
-                cooldown_active = False
-                try:
-                    cooldown_val = await redis_client.get(f"last_llm_rerank:{tg_id}")
-                    if cooldown_val:
-                        cooldown_active = True
-                except Exception:
-                    pass
+
 
                 # Step 2: LLM Reranking (passing the user query to the reranker)
                 await status_msg.edit_text("🧠 <b>Running AI match analysis and re-ranking...</b>", parse_mode="HTML")
                 reranked = await stage2_rerank(user, candidates, user_query=user_query, refine=False)
 
+                # Display the top reranked jobs
                 top_results = reranked[:5]
                 await status_msg.delete()
 
-                await update.message.reply_html(
-                    f"💼 <b>Top Job Recommendations for:</b> <code>{escape(user_query)}</code>"
-                )
-
-                for res in top_results:
-                    job = res["job"]
-                    evaluation = res["evaluation"]
-
-                    gaps = evaluation.skill_gaps
-                    gaps_str = ", ".join([f"<code>{escape(g)}</code>" for g in gaps]) if gaps else "<i>None identified!</i>"
-
-                    card_text = (
-                        f"🎯 <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n"
-                        f"📍 <b>Location:</b> {escape(job.location or 'Remote')}\n"
-                        f"📊 <b>Match Score:</b> <b>{evaluation.score}%</b>\n"
-                        f"⚠️ <b>Key Skill Gaps:</b> {gaps_str}\n"
-                    )
-
-                    keyboard = [
-                        [
-                            InlineKeyboardButton("🔍 View Details", callback_data=f"job_view_{job.id}"),
-                            InlineKeyboardButton("✨ Tailor Resume", callback_data=f"job_tailor_{job.id}")
-                        ]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-
-                    await update.message.reply_html(card_text, reply_markup=reply_markup)
-
-                # Show Refine Results button if cooldown was triggered or if any of the results are fallback evaluations
-                has_fallback = any("cooldown active" in (res["evaluation"].reasoning or "").lower() for res in top_results)
-                
-                if cooldown_active or has_fallback:
-                    refine_keyboard = [
-                        [InlineKeyboardButton("🔄 Refine Results with AI", callback_data="jobs_refine")]
-                    ]
-                    refine_markup = InlineKeyboardMarkup(refine_keyboard)
+                if not top_results:
                     await update.message.reply_html(
-                        "⚠️ <b>Note:</b> You are seeing cached matches or keyword fallbacks due to the 4-hour AI rate limit.\n\n"
-                        "Click below to force a deep AI match evaluation and skill gap analysis.",
-                        reply_markup=refine_markup
+                        "🤷 <b>No matching jobs found.</b>\n"
+                        "Try refining your search keyword or profile details."
                     )
+                else:
+                    await update.message.reply_html(
+                        f"💼 <b>Top Job Recommendations:</b>"
+                    )
+
+                    for res in top_results:
+                        job = res["job"]
+                        evaluation = res["evaluation"]
+
+                        gaps = evaluation.skill_gaps
+                        gaps_str = ", ".join([f"<code>{escape(g)}</code>" for g in gaps]) if gaps else "<i>None identified!</i>"
+
+                        card_text = (
+                            f"🎯 <b>{escape(job.title)}</b> at <b>{escape(job.company)}</b>\n"
+                            f"📍 <b>Location:</b> {escape(job.location or 'Remote')}\n"
+                            f"📊 <b>Match Score:</b> <b>{evaluation.score}%</b>\n"
+                            f"⚠️ <b>Key Skill Gaps:</b> {gaps_str}\n"
+                        )
+
+                        keyboard = [
+                            [
+                                InlineKeyboardButton("🔍 View Details", callback_data=f"job_view_{job.id}"),
+                                InlineKeyboardButton("✨ Tailor Resume", callback_data=f"job_tailor_{job.id}")
+                            ]
+                        ]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+
+                        await update.message.reply_html(card_text, reply_markup=reply_markup)
+
+
+
+                from app.services.analytics import track_event
+                latency = (time.time() - start_time) * 1000
+                await track_event(tg_id, "job_search", latency)
 
         except Exception as e:
             logger.error(f"Error during search command flow: {e}", exc_info=True)

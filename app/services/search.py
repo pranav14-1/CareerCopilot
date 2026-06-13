@@ -5,7 +5,7 @@ import hashlib
 import asyncio
 from typing import List, Dict, Any, Optional
 import instructor
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, and_
 from pydantic import BaseModel, Field
 
 from app.models.schemas import Job, User
@@ -102,81 +102,127 @@ async def stage1_retrieval(
         func.coalesce(Job.requirements, "")
     )
 
-    # 1. Lexical Search (FTS) on Resume Skills
-    lexical_skills_jobs = []
-    skills_query = build_tsquery_from_skills(skills)
-    if skills_query:
-        ts_query_skills = func.to_tsquery("english", skills_query)
-        stmt = (
-            select(Job)
-            .where(fts_vector.op("@@")(ts_query_skills))
-            .order_by(func.ts_rank_cd(fts_vector, ts_query_skills).desc())
-            .limit(30)
+    # Define strict location filter for Indian Job Market (including remote eligible for India)
+    location_filter = or_(
+        Job.location.ilike("%india%"),
+        Job.location.ilike("%bangalore%"),
+        Job.location.ilike("%bengaluru%"),
+        Job.location.ilike("%hyderabad%"),
+        Job.location.ilike("%delhi%"),
+        Job.location.ilike("%mumbai%"),
+        Job.location.ilike("%noida%"),
+        Job.location.ilike("%pune%"),
+        Job.location.ilike("%chennai%"),
+        Job.location.ilike("%gurgaon%"),
+        Job.location.ilike("%ncr%"),
+        Job.location.ilike("%kolkata%"),
+        Job.location.is_(None),
+        and_(
+            or_(Job.location.ilike("%remote%"), Job.location.ilike("%worldwide%")),
+            Job.location.not_ilike("%us%"),
+            Job.location.not_ilike("%usa%"),
+            Job.location.not_ilike("%europe%"),
+            Job.location.not_ilike("%germany%"),
+            Job.location.not_ilike("%uk%"),
+            Job.location.not_ilike("%canada%"),
+            Job.location.not_ilike("%america%"),
         )
-        try:
-            res = await db.execute(stmt)
-            lexical_skills_jobs = res.scalars().all()
-        except Exception as e:
-            logger.error(f"FTS skills query failed: {e}")
+    )
 
-    # 2. Lexical Search (FTS) on Stated Preference Query
-    lexical_pref_jobs = []
-    if user_query:
-        # Split search query words
-        query_words = user_query.split()
-        pref_query = build_tsquery_from_skills(query_words)
-        if pref_query:
-            ts_query_pref = func.to_tsquery("english", pref_query)
-            stmt = (
-                select(Job)
-                .where(fts_vector.op("@@")(ts_query_pref))
-                .order_by(func.ts_rank_cd(fts_vector, ts_query_pref).desc())
-                .limit(30)
-            )
-            try:
-                res = await db.execute(stmt)
-                lexical_pref_jobs = res.scalars().all()
-            except Exception as e:
-                logger.error(f"FTS preference query failed: {e}")
-
-    # 3. Semantic Search (pgvector) on Resume Embedding
-    vector_resume_jobs = []
-    if user.resume_embedding is not None:
-        stmt = (
-            select(Job)
-            .order_by(Job.embedding.cosine_distance(user.resume_embedding))
-            .limit(30)
-        )
-        try:
-            res = await db.execute(stmt)
-            vector_resume_jobs = res.scalars().all()
-        except Exception as e:
-            logger.error(f"Vector resume query failed: {e}")
-
-    # 4. Semantic Search (pgvector) on Stated Preference Query Embedding
-    vector_pref_jobs = []
-    if user_query:
-        try:
-            pref_embedding = await generate_query_embedding(user_query)
-            stmt = (
-                select(Job)
-                .order_by(Job.embedding.cosine_distance(pref_embedding))
-                .limit(30)
-            )
-            res = await db.execute(stmt)
-            vector_pref_jobs = res.scalars().all()
-        except Exception as e:
-            logger.error(f"Vector preference query failed: {e}")
-
-    # Merge routes using RRF
     rrf_scores = {}
     job_map = {}
 
-    # Process all lists
-    for r_list in [lexical_skills_jobs, lexical_pref_jobs, vector_resume_jobs, vector_pref_jobs]:
-        for rank, job in enumerate(r_list):
-            job_map[job.id] = job
-            rrf_scores[job.id] = rrf_scores.get(job.id, 0.0) + (1.0 / (60.0 + rank + 1))
+    # Run two-pass retrieval:
+    # Pass 1: Try strict location filtering (India + Remote)
+    # Pass 2: Fallback to searching without location constraints if no Indian/remote matches are found
+    locations_to_check = ["india", "remote", "bangalore", "hyderabad", "delhi", "mumbai", "noida", "pune", "chennai", "gurgaon", "bengaluru", "kolkata"]
+    has_explicit_location = False
+    if user_query:
+        q_clean = user_query.lower()
+        for loc in locations_to_check:
+            if loc in q_clean:
+                has_explicit_location = True
+                break
+
+    for pass_num in [1, 2]:
+        use_location = (pass_num == 1)
+        if not use_location and has_explicit_location:
+            break
+        filter_cond = location_filter if use_location else None
+        
+        # 1. Lexical Search (FTS) on Resume Skills
+        lexical_skills_jobs = []
+        skills_query = build_tsquery_from_skills(skills)
+        if skills_query:
+            ts_query_skills = func.to_tsquery("english", skills_query)
+            stmt = select(Job).where(fts_vector.op("@@")(ts_query_skills))
+            if filter_cond is not None:
+                stmt = stmt.where(filter_cond)
+            stmt = stmt.order_by(func.ts_rank_cd(fts_vector, ts_query_skills).desc()).limit(30)
+            try:
+                res = await db.execute(stmt)
+                lexical_skills_jobs = res.scalars().all()
+            except Exception as e:
+                logger.error(f"FTS skills query failed: {e}")
+
+        # 2. Lexical Search (FTS) on Stated Preference Query
+        lexical_pref_jobs = []
+        if user_query:
+            query_words = user_query.split()
+            pref_query = build_tsquery_from_skills(query_words)
+            if pref_query:
+                ts_query_pref = func.to_tsquery("english", pref_query)
+                stmt = select(Job).where(fts_vector.op("@@")(ts_query_pref))
+                if filter_cond is not None:
+                    stmt = stmt.where(filter_cond)
+                stmt = stmt.order_by(func.ts_rank_cd(fts_vector, ts_query_pref).desc()).limit(30)
+                try:
+                    res = await db.execute(stmt)
+                    lexical_pref_jobs = res.scalars().all()
+                except Exception as e:
+                    logger.error(f"FTS preference query failed: {e}")
+
+        # 3. Semantic Search (pgvector) on Resume Embedding
+        vector_resume_jobs = []
+        if user.resume_embedding is not None:
+            stmt = select(Job)
+            if filter_cond is not None:
+                stmt = stmt.where(filter_cond)
+            stmt = stmt.order_by(Job.embedding.cosine_distance(user.resume_embedding)).limit(30)
+            try:
+                res = await db.execute(stmt)
+                vector_resume_jobs = res.scalars().all()
+            except Exception as e:
+                logger.error(f"Vector resume query failed: {e}")
+
+        # 4. Semantic Search (pgvector) on Stated Preference Query Embedding
+        vector_pref_jobs = []
+        if user_query:
+            try:
+                pref_embedding = await generate_query_embedding(user_query)
+                stmt = select(Job)
+                if filter_cond is not None:
+                    stmt = stmt.where(filter_cond)
+                stmt = stmt.order_by(Job.embedding.cosine_distance(pref_embedding)).limit(30)
+                res = await db.execute(stmt)
+                vector_pref_jobs = res.scalars().all()
+            except Exception as e:
+                logger.error(f"Vector preference query failed: {e}")
+
+        # Merge routes using RRF with double weight for user preference queries (role & keywords)
+        rrf_scores.clear()
+        job_map.clear()
+        for idx, r_list in enumerate([lexical_skills_jobs, lexical_pref_jobs, vector_resume_jobs, vector_pref_jobs]):
+            weight_multiplier = 2.0 if idx in [1, 3] else 1.0
+            for rank, job in enumerate(r_list):
+                job_map[job.id] = job
+                rrf_scores[job.id] = rrf_scores.get(job.id, 0.0) + weight_multiplier * (1.0 / (60.0 + rank + 1))
+
+        # If we found matches or we are already in the fallback pass, break
+        if rrf_scores or not use_location:
+            if not use_location and rrf_scores:
+                logger.info("No Indian opportunities matched. Fallback pass retrieved relevant global/other options.")
+            break
 
     # Apply boosts for location and experience level
     user_exp = (user.extracted_profile or {}).get("experience_level", "Fresher").strip()
@@ -184,11 +230,13 @@ async def stage1_retrieval(
     # Extract location keywords from query
     locations_to_check = ["india", "remote", "bangalore", "hyderabad", "delhi", "mumbai", "noida", "pune", "chennai", "gurgaon"]
     target_locations = []
+    has_explicit_location = False
     if user_query:
         q_clean = user_query.lower()
         for loc in locations_to_check:
             if loc in q_clean:
                 target_locations.append(loc)
+        has_explicit_location = bool(target_locations)
     
     # Default to India + Remote if none specified
     if not target_locations:
@@ -199,10 +247,18 @@ async def stage1_retrieval(
         job_loc = (job.location or "").lower()
         job_text = f"{job.title} {job.description} {job.requirements or ''}".lower()
 
-        # 1. Location boosting
+        # 1. Location boosting (higher boost if user explicitly requested this location)
         for target in target_locations:
             if target in job_loc:
                 boost += 0.05  # RRF score boost for location match
+                if has_explicit_location:
+                    boost += 0.15  # Extra boost for matching explicitly specified user location
+
+        # 3. Source boosting for Indian users (Instahyre, Cutshort, Hirist)
+        job_url = (job.url or "").lower()
+        if "instahyre" in job_url or "cutshort" in job_url or "hirist" in job_url:
+            boost += 0.15  # Additional boost for preferred Indian portals (increased from 0.08)
+
 
         # 2. Experience level boosting
         uexp_lower = user_exp.lower()
@@ -252,8 +308,8 @@ async def stage2_rerank(
     refine: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    Reranks candidate jobs using LLM reasoning (via single structured batch call) and Redis cache.
-    Optimizes costs via pre-filtering, a 4-hour rerank cooldown, and a 30-day cache TTL.
+    Reranks candidate jobs using LLM reasoning (via single structured batch call).
+    Always provides fresh evaluation results.
     """
     if not candidates:
         return []
@@ -262,172 +318,126 @@ async def stage2_rerank(
     
     user_profile = user.extracted_profile or {}
     user_id = user.telegram_id
-    cooldown_key = f"last_llm_rerank:{user_id}"
-    
-    cooldown_active = False
-    try:
-        cooldown_val = await redis_client.get(cooldown_key)
-        if cooldown_val:
-            cooldown_active = True
-    except Exception as e:
-        logger.warning(f"Failed to check Redis cooldown: {e}")
-
-    # Clean the query for key matching (hash query)
     exp_clean = user_profile.get("experience_level", "Fresher").strip().lower()
-    cleaned_query = (user_query or "").strip().lower()
-    query_hash = hashlib.md5(cleaned_query.encode("utf-8")).hexdigest() if cleaned_query else "none"
 
     results = []
-    uncached_jobs = []
-
-    # Check cache first
+    
+    # Cheap pre-filtering before LLM call
+    jobs_to_llm = []
     for job in candidates:
-        cache_key = f"job_eval:{user_id}:{job.id}:{exp_clean}:{query_hash}"
+        if passes_pre_filter(user_profile, user_query, job):
+            jobs_to_llm.append(job)
+        else:
+            # Low score for failed pre-filter
+            fallback_eval = JobMatchEvaluation(
+                score=30,
+                reasoning="Did not pass initial skill keyword pre-filtering.",
+                skill_gaps=[]
+            )
+            results.append({
+                "job": job,
+                "evaluation": fallback_eval
+            })
+
+    # Call Gemini in batch for jobs that passed the pre-filter
+    if jobs_to_llm:
+        logger.info(f"Calling Gemini Batch Re-ranker for {len(jobs_to_llm)} jobs...")
+        instructor_client = instructor.from_provider(
+            "google/gemini-2.5-flash",
+            async_client=True,
+        )
+        
+        jobs_list_str = ""
+        for idx, job in enumerate(jobs_to_llm):
+            jobs_list_str += f"\n--- JOB {idx + 1} ---\n"
+            jobs_list_str += f"ID: {job.id}\n"
+            jobs_list_str += f"Title: {job.title}\n"
+            jobs_list_str += f"Company: {job.company}\n"
+            jobs_list_str += f"Location: {job.location}\n"
+            jobs_list_str += f"Description: {job.description[:1000]}\n"
+            jobs_list_str += f"Requirements: {job.requirements or 'N/A'}\n"
+
+        prompt = (
+            "You are an elite technical recruiter.\n"
+            "Evaluate how well the candidate's resume profile matches each of the following job openings, "
+            "keeping in mind the candidate's stated job search interest and experience level.\n\n"
+            "=== CANDIDATE RESUME ===\n"
+            f"{json.dumps(user_profile, indent=2)}\n\n"
+            f"=== CANDIDATE SEARCH INTEREST ===\n"
+            f"{user_query or 'None stated'}\n\n"
+            f"=== CANDIDATE EXPERIENCE LEVEL ===\n"
+            f"{exp_clean}\n\n"
+            "=== JOB OPENINGS TO EVALUATE ===\n"
+            f"{jobs_list_str}\n\n"
+            "For each job opening, assign a matching score (0-100), write a concise reasoning explaining the fit "
+            "or lack thereof (incorporating how well it matches both the resume, experience level, and their search interest), "
+            "and specify any skill gaps."
+        )
+
         try:
-            cached_data = await redis_client.get(cache_key)
-            if cached_data:
-                logger.info(f"Redis Cache HIT for job: {job.title} ({job.id})")
-                eval_dict = json.loads(cached_data)
+            import time
+            from app.services.analytics import track_event
+
+            start_time = time.time()
+            batch_response, raw = await instructor_client.create_with_completion(
+                response_model=BatchJobMatchEvaluations,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                validation_context={"temperature": 0.1}
+            )
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Record LLM usage
+            prompt_tokens = 0
+            completion_tokens = 0
+            usage = getattr(raw, "usage_metadata", None)
+            if usage:
+                prompt_tokens = usage.prompt_token_count
+                completion_tokens = usage.candidates_token_count
+
+            await track_event(
+                user_id=user_id,
+                event_type="rerank_llm_call",
+                latency_ms=duration_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens
+            )
+            
+            eval_map = {str(e.job_id): e for e in batch_response.evaluations}
+            
+            for job in jobs_to_llm:
+                eval_obj = eval_map.get(str(job.id))
+                if not eval_obj:
+                    eval_obj = JobMatchEvaluation(
+                        score=50,
+                        reasoning="Batch AI evaluation did not return specific results for this job.",
+                        skill_gaps=[]
+                    )
+                else:
+                    eval_obj = JobMatchEvaluation(
+                        score=eval_obj.score,
+                        reasoning=eval_obj.reasoning,
+                        skill_gaps=eval_obj.skill_gaps
+                    )
+                    
                 results.append({
                     "job": job,
-                    "evaluation": JobMatchEvaluation.model_validate(eval_dict)
+                    "evaluation": eval_obj
                 })
-                continue
-        except Exception as e:
-            logger.warning(f"Failed to query Redis cache: {e}")
 
-        # Cache miss
-        uncached_jobs.append(job)
-
-    # Handle uncached jobs
-    if uncached_jobs:
-        if cooldown_active and not refine:
-            logger.info("LLM reranking cooldown active. Skipping Gemini API calls for uncached jobs.")
-            for job in uncached_jobs:
-                fallback_eval = JobMatchEvaluation(
+        except Exception as batch_err:
+            logger.error(f"Gemini batch evaluation failed: {batch_err}")
+            for job in jobs_to_llm:
+                fallback = JobMatchEvaluation(
                     score=50,
-                    reasoning="LLM reranking cooldown active (4 hours). Click 'Refine Results' to run deep AI match analysis.",
+                    reasoning="Failed to perform batch AI matching due to an external service error.",
                     skill_gaps=[]
                 )
                 results.append({
                     "job": job,
-                    "evaluation": fallback_eval
+                    "evaluation": fallback
                 })
-        else:
-            # Cheap pre-filtering before LLM call
-            jobs_to_llm = []
-            for job in uncached_jobs:
-                if passes_pre_filter(user_profile, user_query, job):
-                    jobs_to_llm.append(job)
-                else:
-                    # Low score for failed pre-filter
-                    fallback_eval = JobMatchEvaluation(
-                        score=30,
-                        reasoning="Did not pass initial skill keyword pre-filtering.",
-                        skill_gaps=[]
-                    )
-                    # Cache the pre-filter failure in Redis for 30 days (2592000 seconds)
-                    cache_key = f"job_eval:{user_id}:{job.id}:{exp_clean}:{query_hash}"
-                    try:
-                        await redis_client.set(cache_key, fallback_eval.model_dump_json(), ex=2592000)
-                    except Exception as e:
-                        logger.warning(f"Failed to cache pre-filter failure: {e}")
-                    results.append({
-                        "job": job,
-                        "evaluation": fallback_eval
-                    })
-
-            # Call Gemini in batch for jobs that passed the pre-filter
-            if jobs_to_llm:
-                logger.info(f"Calling Gemini Batch Re-ranker for {len(jobs_to_llm)} jobs...")
-                instructor_client = instructor.from_provider(
-                    "google/gemini-2.5-flash",
-                    async_client=True,
-                )
-                
-                jobs_list_str = ""
-                for idx, job in enumerate(jobs_to_llm):
-                    jobs_list_str += f"\n--- JOB {idx + 1} ---\n"
-                    jobs_list_str += f"ID: {job.id}\n"
-                    jobs_list_str += f"Title: {job.title}\n"
-                    jobs_list_str += f"Company: {job.company}\n"
-                    jobs_list_str += f"Location: {job.location}\n"
-                    jobs_list_str += f"Description: {job.description[:1000]}\n"
-                    jobs_list_str += f"Requirements: {job.requirements or 'N/A'}\n"
-
-                prompt = (
-                    "You are an elite technical recruiter.\n"
-                    "Evaluate how well the candidate's resume profile matches each of the following job openings, "
-                    "keeping in mind the candidate's stated job search interest and experience level.\n\n"
-                    "=== CANDIDATE RESUME ===\n"
-                    f"{json.dumps(user_profile, indent=2)}\n\n"
-                    f"=== CANDIDATE SEARCH INTEREST ===\n"
-                    f"{user_query or 'None stated'}\n\n"
-                    f"=== CANDIDATE EXPERIENCE LEVEL ===\n"
-                    f"{exp_clean}\n\n"
-                    "=== JOB OPENINGS TO EVALUATE ===\n"
-                    f"{jobs_list_str}\n\n"
-                    "For each job opening, assign a matching score (0-100), write a concise reasoning explaining the fit "
-                    "or lack thereof (incorporating how well it matches both the resume, experience level, and their search interest), "
-                    "and specify any skill gaps."
-                )
-
-                try:
-                    batch_response: BatchJobMatchEvaluations = await instructor_client.create(
-                        response_model=BatchJobMatchEvaluations,
-                        messages=[
-                            {"role": "user", "content": prompt}
-                        ],
-                        validation_context={"temperature": 0.1}
-                    )
-                    
-                    eval_map = {str(e.job_id): e for e in batch_response.evaluations}
-                    
-                    for job in jobs_to_llm:
-                        eval_obj = eval_map.get(str(job.id))
-                        if not eval_obj:
-                            eval_obj = JobMatchEvaluation(
-                                score=50,
-                                reasoning="Batch AI evaluation did not return specific results for this job.",
-                                skill_gaps=[]
-                            )
-                        else:
-                            eval_obj = JobMatchEvaluation(
-                                score=eval_obj.score,
-                                reasoning=eval_obj.reasoning,
-                                skill_gaps=eval_obj.skill_gaps
-                            )
-
-                        # Cache in Redis with 30 days TTL (2592000 seconds)
-                        cache_key = f"job_eval:{user_id}:{job.id}:{exp_clean}:{query_hash}"
-                        try:
-                            await redis_client.set(cache_key, eval_obj.model_dump_json(), ex=2592000)
-                        except Exception as cache_err:
-                            logger.warning(f"Failed to cache job eval: {cache_err}")
-                            
-                        results.append({
-                            "job": job,
-                            "evaluation": eval_obj
-                        })
-
-                    # Set 4-hour LLM cooldown in Redis (14400 seconds)
-                    try:
-                        await redis_client.set(cooldown_key, "active", ex=14400)
-                    except Exception as cooldown_err:
-                        logger.warning(f"Failed to set Redis cooldown: {cooldown_err}")
-
-                except Exception as batch_err:
-                    logger.error(f"Gemini batch evaluation failed: {batch_err}")
-                    for job in jobs_to_llm:
-                        fallback = JobMatchEvaluation(
-                            score=50,
-                            reasoning="Failed to perform batch AI matching due to an external service error.",
-                            skill_gaps=[]
-                        )
-                        results.append({
-                            "job": job,
-                            "evaluation": fallback
-                        })
 
     # Sort results by score descending
     results.sort(key=lambda x: x["evaluation"].score, reverse=True)

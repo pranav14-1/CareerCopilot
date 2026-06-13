@@ -98,6 +98,7 @@ class Job(Base):
     location: Mapped[str] = mapped_column(String(255), nullable=True)
     description: Mapped[str] = mapped_column(Text)
     requirements: Mapped[str] = mapped_column(Text, nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, index=True)
     
     __table_args__ = (
         Index(
@@ -155,3 +156,20 @@ class Application(Base):
 
     def __repr__(self) -> str:
         return f"<Application id={self.id} user_id={self.user_id} status={self.status}>"
+
+
+class NewsArticle(Base):
+    """
+    Stores aggregated, deduplicated global tech news articles.
+    """
+    __tablename__ = "news_articles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(String(255), index=True)
+    url: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<NewsArticle id={self.id} title={self.title} source={self.source}>"
