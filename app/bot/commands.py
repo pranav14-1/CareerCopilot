@@ -10,28 +10,35 @@ logger = logging.getLogger(__name__)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /start command. Welcomes user and prompts for resume upload.
+    Added robust error handling to guarantee a response.
     """
-    Handle the /start command. Welcomes user and prompts for resume upload.
-    """
-    welcome_text = (
-        "👋 <b>Welcome to AI Career Copilot!</b>\n\n"
-        "I am your agentic job assistant, designed to help BTech students break "
-        "into AI, Backend, and Forward Deployed Engineering roles.\n\n"
-        "⚡ <b>Getting Started:</b>\n"
-        "1. Send me your resume as a <b>PDF document</b> (max 5MB).\n"
-        "2. I'll parse it and build your semantic profile.\n"
-        "3. Use /jobs to find hyper-relevant matches!\n\n"
-        "<b>Available commands:</b>\n"
-        "/start - Welcome and onboarding info\n"
-        "/profile - Inspect your parsed profile\n"
-        "/jobs - Two-stage hybrid job matches\n"
-        "/tailor - Adapt your resume for a job\n"
-        "/learn - Generate missing skill roadmaps\n"
-        "/news - View personalized tech briefings\n"
-        "/stats - View system trace and cost statistics"
-    )
-    await update.message.reply_html(welcome_text)
+    try:
+        welcome_text = (
+            "👋 <b>Welcome to AI Career Copilot!</b>\n\n"
+            "I am your agentic job assistant, designed to help BTech students break "
+            "into AI, Backend, and Forward Deployed Engineering roles.\n\n"
+            "⚡ <b>Getting Started:</b>\n"
+            "1. Send me your resume as a <b>PDF document</b> (max 5MB).\n"
+            "2. I'll parse it and build your semantic profile.\n"
+            "3. Use /jobs to find hyper-relevant matches!\n\n"
+            "<b>Available commands:</b>\n"
+            "/start - Welcome and onboarding info\n"
+            "/profile - Inspect your parsed profile\n"
+            "/jobs - Two-stage hybrid job matches\n"
+            "/tailor - Adapt your resume for a job\n"
+            "/learn - Generate missing skill roadmaps\n"
+            "/news - View personalized tech briefings\n"
+            "/stats - View system trace and cost statistics"
+        )
+        await update.message.reply_html(welcome_text)
+    except Exception as e:
+        logger.error(f"Failed to handle /start command: {e}", exc_info=True)
+        await update.message.reply_html("❌ <b>Unable to process /start command. Please try again later.</b>")
+    # Ensure function completes without returning a value
+    return
 
+    
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
