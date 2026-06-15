@@ -21,6 +21,11 @@ FROM python:3.11-slim AS runner
 
 WORKDIR /app
 
+# Install system dependencies, including fonts for Typst resume compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create a non-root system user and group
 RUN groupadd -g 10001 appuser && \
     useradd -u 10001 -g appuser -m -s /bin/bash appuser
@@ -28,6 +33,10 @@ RUN groupadd -g 10001 appuser && \
 # Copy virtualenv from builder
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Playwright browser binaries and their OS dependencies
+# This must be run as root to allow installing apt packages
+RUN playwright install --with-deps chromium
 
 # Copy project files and set ownership
 COPY --chown=appuser:appuser . /app
@@ -43,3 +52,4 @@ USER appuser
 
 # Default execution command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
