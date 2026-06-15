@@ -91,7 +91,7 @@ async def get_personalized_briefing(user_profile: dict, db, user_id: int) -> dic
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            validation_context={"temperature": 0.2}
+            config={"temperature": 0.2}
         )
         duration_ms = (time.time() - start_time) * 1000
         

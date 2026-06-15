@@ -98,7 +98,7 @@ async def analyze_skill_gaps(user_profile: Dict[str, Any], db, user_id: int) -> 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            validation_context={"temperature": 0.2}
+            config={"temperature": 0.2}
         )
         duration_ms = (time.time() - start_time) * 1000
         

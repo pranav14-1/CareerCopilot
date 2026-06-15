@@ -66,8 +66,7 @@ async def extract_structured_profile(raw_text: str) -> UserProfileSchema:
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            # We can adjust temperature to enforce structure precision
-            validation_context={"temperature": 0.0}
+            config={"temperature": 0.0}
         )
         logger.info(f"Successfully extracted structured profile for {profile.name}")
         return profile

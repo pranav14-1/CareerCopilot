@@ -384,7 +384,7 @@ async def stage2_rerank(
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                validation_context={"temperature": 0.1}
+                config={"temperature": 0.1}
             )
             duration_ms = (time.time() - start_time) * 1000
 

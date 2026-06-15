@@ -107,7 +107,7 @@ async def writer_agent(state: TailorState, config: Optional[Dict[str, Any]] = No
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            validation_context={"temperature": 0.2}
+            config={"temperature": 0.2}
         )
 
         # Log Token Usage
@@ -213,7 +213,7 @@ async def ats_critic_agent(state: TailorState, config: Optional[Dict[str, Any]] 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            validation_context={"temperature": 0.1}
+            config={"temperature": 0.1}
         )
 
         # Log Token Usage

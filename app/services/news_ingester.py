@@ -199,7 +199,7 @@ async def fetch_and_ingest_news() -> None:
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            validation_context={"temperature": 0.2}
+            config={"temperature": 0.2}
         )
 
         # Log Token Usage
