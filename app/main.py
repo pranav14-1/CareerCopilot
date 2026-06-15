@@ -60,9 +60,13 @@ def setup_telemetry(app: FastAPI) -> None:
                     logger.warning(f"Could not load OTLP HTTP Exporter ({e_http}), falling back to console.")
                     provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
         else:
-            # Fallback to console trace logging in debug/development
-            provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-            logger.info("OpenTelemetry registered with Console Span Exporter.")
+            if settings.DEBUG:
+                # Fallback to console trace logging in debug/development
+                provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+                logger.info("OpenTelemetry registered with Console Span Exporter.")
+            else:
+                logger.info("OpenTelemetry trace exporting is disabled (production mode, no endpoint configured).")
+
 
         trace.set_tracer_provider(provider)
         FastAPIInstrumentor.instrument_app(app)

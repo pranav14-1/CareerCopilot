@@ -49,7 +49,8 @@ class Settings(BaseSettings):
 
     # --- OpenTelemetry ---
     OTEL_SERVICE_NAME: str = "career-copilot"
-    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
+    OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = ""
+
 
     # --- Scraping Configurations ---
     ENABLE_SCRAPING: bool = False
